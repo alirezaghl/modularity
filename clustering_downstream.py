@@ -1,60 +1,42 @@
 """
-Downstream Modularity Clustering — with Robustness & Interpretation Validation
-================================================================================
+Downstream Modularity Clustering — aligned with wrongu/modularity repo
+========================================================================
 
-Answers two questions per layer per model:
+Pipeline mirrors the three-layer structure of the original:
 
-  1. ARE THE CLUSTERS MEANINGFUL AND ROBUST?
-     (a) Permutation null for Q
-         Shuffle act_raw columns → re-z-score → re-cluster → null Q distribution.
-         p_q = fraction of null runs with Q >= observed Q.
-         Directly from modularity.py logic: shuffled_alignment_score() does
-         the same shuffle for cluster alignment.
+  SECTION 1 — ASSOCIATIONS  (associations.py analog)
+    Two association graphs per layer:
+      adj_down : probe-Jacobian downstream graph
+                 A[i,j] = Σ_tasks W_t[:,i]^T W_t[:,j]
+                 For a linear probe y=Wh, ∂y/∂h_i = W[:,i], so this is
+                 the inner product of output-sensitivity vectors — the
+                 direct analog of backward_jac in the original repo.
+      adj_tune : task co-tuning graph  (activation-profile / upstream-style)
+                 A[i,j] = max(0, act_z[i] · act_z[j])
+                 Analog of forward_cov in the original repo.
 
-     (b) Bootstrap neuron stability
-         Subsample 80% of neurons N_BOOT times → re-cluster → ARI(full, sub).
-         High mean ARI = the partition is not driven by a handful of neurons.
+  SECTION 2 — MODULARITY CLUSTERING  (modularity.py analog)
+    spectral initialisation + Monte Carlo refinement of GN Q,
+    dead neurons (degree-zero after sparsification) excluded with label -1.
 
-     (c) Method agreement
-         ARI(GN, Agglomerative) — two fundamentally different algorithms on
-         the same data. Agreement = robust signal. Disagreement = one method
-         is finding noise or topology the other misses.
+  SECTION 3 — EVALUATION  (eval.py analog)
+    Alignment and transfer between the two association graphs,
+    permutation null (same optimizer as observed), bootstrap stability,
+    SI biological validation.
 
-     (d) Shuffled alignment null
-         Port of shuffled_alignment_score() from modularity.py:
-         permute neuron order in one clustering → compute alignment score →
-         null distribution for how much agreement is expected by chance.
+Paper wording:
+  "Following the modularity framework of Lange et al. (2022), we construct
+   neuron-neuron association graphs and maximise Newman-Girvan modularity Q.
+   For downstream association we use the Jacobian of trained linear probes
+   with respect to hidden units; for a linear probe y=Wh this reduces to
+   inner products between probe-weight columns. We compare these downstream
+   modules to empirical task co-tuning modules and test whether the
+   resulting communities align with biological SI."
 
-  2. WHAT DO THE CLUSTERS REFER TO?
-     (a) Automatic labeling
-         Each cluster gets a label from its z-scored tuning profile:
-           'motion'     — mean z-score on MOTION_TASKS >> APPEAR_TASKS
-           'appearance' — mean z-score on APPEAR_TASKS >> MOTION_TASKS
-           'generalist' — flat profile (|selectivity| < GENERALIST_THRESH)
-         Selectivity index per cluster:
-           SI_task = (motion_mean - appear_mean) / (|motion_mean| + |appear_mean| + ε)
-         Range [-1, 1]. Positive = motion-dominant, negative = appear-dominant.
-
-     (b) SI alignment (biological validation — non-circular)
-         For each cluster: mean SI (dorsal/ventral bias of its neurons).
-         Mann-Whitney U test between all cluster pairs.
-         Expected: motion-labeled cluster has SI > 0 (dorsal-biased).
-
-     (c) Q transfer score (from modularity.py eval.py logic)
-         Apply GN cluster partition to the AGGLOMERATIVE affinity graph and
-         vice versa. If the partition is meaningful, it should score above
-         random on an independently-constructed graph of the same neurons.
-         transfer_GN_on_Agg = Q of GN labels evaluated on Agg adjacency matrix
-         transfer_Agg_on_GN = Q of Agg labels evaluated on GN adjacency matrix
-
-     (d) Tuning profile sharpness
-         For each cluster: max(mean_act) - min(mean_act) in z-score units.
-         Sharpness > 1 = the cluster has a clear task preference.
-         Sharpness ~ 0 = flat generalist cluster.
-
-Output per model:
-    {model}_downstream_clustering.npz   — numeric results
-    {model}_downstream_summary.txt      — human-readable table
+Output:
+    $SCRATCH/DOWNSTREAM/neuron_selectivity_v3/{model}/
+        {model}_downstream_clustering.npz
+        {model}_downstream_summary.txt
 
 Usage:
     python clustering_downstream.py vjepa_16f
@@ -96,26 +78,33 @@ APPEAR_TASKS = ('imagenet', 'cifar100', 'k400')
 
 SELECTED_LAYERS = [0, 4, 8, 12, 16, 20, 23]
 
-AGG_LINKAGE = 'average'
-DIST_THRESH = 0.4
-
+# GN modularity parameters
 GN_SPARSIFY_FRAC  = 0.20
 GN_MAX_CLUSTERS   = 16
 MC_STEPS          = 5000
 GN_TARGET_ENTROPY = 0.15
 GN_EPS            = 1e-15
 
-# Robustness / interpretation parameters
-N_PERM             = 100    # permutation null runs for Q
-N_BOOT             = 100    # bootstrap stability runs
-BOOT_FRAC          = 0.80   # fraction of neurons per bootstrap subsample
-N_SHUFFLE_ALIGN    = 1000   # shuffled alignment null samples
-GENERALIST_THRESH  = 0.20   # |selectivity| below this → 'generalist' label
+# Robustness parameters
+N_PERM            = 100
+N_BOOT            = 100
+BOOT_FRAC         = 0.80
+N_SHUFFLE_ALIGN   = 1000
+GENERALIST_THRESH = 0.20
+
 
 MODEL_CONFIGS = {
     'vjepa_16f': {
         'label'  : 'V-JEPA2-16f',
         'si_path': SCRATCH / 'clustering_relative/vjepa_16f/specificity_index.json',
+        # Probe weight paths: user fills these in.
+        # Expected format per task: numpy array W of shape [n_classes, D] or [D].
+        # 'probe_weights': {
+        #     'intphys' : SCRATCH / 'probes/vjepa_16f/intphys_weights.npy',
+        #     'imagenet': SCRATCH / 'probes/vjepa_16f/imagenet_weights.npy',
+        #     ...
+        # },
+        'probe_weights': {},   # populate with paths before running
         'tasks'  : {
             'intphys': {
                 'feat_path': SCRATCH / 'DOWNSTREAM/intphys_features/Main/features.npy',
@@ -132,6 +121,7 @@ MODEL_CONFIGS = {
     'vjepa2_1': {
         'label'  : 'V-JEPA2.1',
         'si_path': SCRATCH / 'clustering_relative/vjepa2_1/specificity_index.json',
+        'probe_weights': {},
         'tasks'  : {
             'intphys': {
                 'feat_path': SCRATCH / 'DOWNSTREAM/intphys_vjepa21_vmae_features/Main/vjepa2_1/features.npy',
@@ -148,6 +138,7 @@ MODEL_CONFIGS = {
     'videomae': {
         'label'  : 'VideoMAE',
         'si_path': SCRATCH / 'clustering_relative/videomae/specificity_index.json',
+        'probe_weights': {},
         'tasks'  : {
             'intphys': {
                 'feat_path': SCRATCH / 'DOWNSTREAM/intphys_vjepa21_vmae_features/Main/videomae/features.npy',
@@ -226,6 +217,52 @@ def build_activation_matrix(task_cfgs, layer_idx, seed=SEED):
     return act, act_z, avail_tasks
 
 
+def load_probe_weights(probe_weight_paths: dict, layer_idx: int,
+                       avail_tasks: list[str]) -> dict:
+    """
+    Load linear probe weight matrices for available tasks at a given layer.
+
+    Expected file format for each task: a numpy array of shape [n_classes, D]
+    or [D] (binary/logistic). Files may be layer-specific:
+      path/task_layer_{layer_idx}_weights.npy
+    or a single file containing all layers:
+      path/task_weights.npy  with shape [n_layers, n_classes, D]
+
+    Returns dict task -> W array [n_classes, D], skips tasks with missing files.
+    """
+    weights = {}
+    for task in avail_tasks:
+        if task not in probe_weight_paths:
+            continue
+        p = Path(probe_weight_paths[task])
+
+        # Try layer-specific file first
+        layer_p = p.parent / f'{p.stem}_layer_{layer_idx}{p.suffix}'
+        if layer_p.exists():
+            W = np.load(str(layer_p))
+        elif p.exists():
+            W = np.load(str(p))
+            # If 3-D, index the layer dimension
+            if W.ndim == 3:
+                W = W[layer_idx]
+        else:
+            continue
+
+        W = W.astype(np.float32)
+        if W.ndim == 1:
+            W = W[None, :]          # [1, D]
+        # Ensure shape is [n_classes, D]
+        if W.shape[0] == D and W.shape[-1] != D:
+            W = W.T
+        if W.shape[-1] != D:
+            print(f"  WARNING: probe W for {task} layer {layer_idx} "
+                  f"has unexpected shape {W.shape}, skipping")
+            continue
+        weights[task] = W
+
+    return weights
+
+
 def load_si(si_path):
     if not Path(si_path).exists():
         print(f"  WARNING: SI file not found: {si_path}")
@@ -246,58 +283,104 @@ def load_si(si_path):
 
 
 # =============================================================================
-# Affinity construction
+# SECTION 1 — ASSOCIATIONS
+# Two graphs: probe-Jacobian downstream (primary) + task co-tuning (secondary)
 # =============================================================================
 
-def downstream_affinity_matrix(act_z: np.ndarray) -> np.ndarray:
-    """A[i,j] = max(0, act_z[i] · act_z[j])  — rectified co-tuning Gram matrix."""
+def downstream_probe_jacobian_affinity(probe_weights_by_task: dict,
+                                        avail_tasks: list[str]) -> np.ndarray:
+    """
+    Original-style downstream association using linear-probe Jacobians.
+
+    For a linear probe y = W h,  ∂y/∂h_i = W[:, i].
+    Neuron-neuron association = inner product of output-sensitivity vectors,
+    summed across downstream tasks:
+
+        A[i,j] = Σ_tasks  W_t[:,i]^T  W_t[:,j]  =  Σ_tasks (W_t.T @ W_t)[i,j]
+
+    This is the direct analog of backward_jac in associations.py of the
+    original repo: G_i · G_j where G_i = ∂y/∂h_i.
+
+    Returns (D, D) float32, nonneg, zero diagonal.
+    """
+    A = np.zeros((D, D), dtype=np.float64)
+    n_tasks_used = 0
+    for task in avail_tasks:
+        if task not in probe_weights_by_task:
+            continue
+        W = probe_weights_by_task[task].astype(np.float64)  # [C, D]
+        A += W.T @ W
+        n_tasks_used += 1
+
+    if n_tasks_used == 0:
+        return None
+
+    A = A.astype(np.float32)
+    np.maximum(A, 0.0, out=A)
+    np.fill_diagonal(A, 0.0)
+    return A
+
+
+def task_cotuning_affinity_matrix(act_z: np.ndarray) -> np.ndarray:
+    """
+    Empirical task co-tuning association (activation-profile / upstream-style).
+    Analog of forward_cov in the original repo.
+
+        A[i,j] = max(0, act_z[i] · act_z[j])
+
+    Used as the second association graph for comparison against the
+    probe-Jacobian downstream graph.
+    """
     gram = (act_z @ act_z.T).astype(np.float32)
     np.maximum(gram, 0.0, out=gram)
     np.fill_diagonal(gram, 0.0)
     return gram
 
 
+# =============================================================================
+# SECTION 2 — MODULARITY CLUSTERING
+# sparsify → spectral init → Monte Carlo refinement → handle dead neurons
+# =============================================================================
+
 def sparsify_affinity(adj: np.ndarray,
                       fraction: float = GN_SPARSIFY_FRAC) -> np.ndarray:
-    adj = adj.copy()
+    """
+    Keep the top `fraction` of all off-diagonal entries, weighted (not binary).
+
+    Mirrors sparsify() in modularity.py: accounts for already-zero entries
+    before thresholding so that `fraction` is relative to all edges, not just
+    non-zero ones. Keeps weighted values (not binarized) as in the original.
+    """
+    adj = adj.copy().astype(np.float32)
     np.fill_diagonal(adj, 0.0)
     i_idx, j_idx = np.tril_indices(len(adj), k=-1)
-    off_diag     = adj[i_idx, j_idx]
-    nonzero      = off_diag[off_diag > 0]
-    if len(nonzero) == 0:
+    vals    = adj[i_idx, j_idx]
+    nonzero = vals[vals > 0]
+    if nonzero.size == 0:
         return np.zeros_like(adj)
-    cutoff = float(np.quantile(nonzero, 1.0 - fraction))
-    binary = np.where(adj >= cutoff, 1.0, 0.0).astype(np.float32)
-    np.fill_diagonal(binary, 0.0)
-    np.maximum(binary, binary.T, out=binary)
-    return binary
 
+    # fraction of all off-diagonal entries that are already zero
+    zero_frac = 1.0 - nonzero.size / vals.size
+    if fraction <= zero_frac:
+        return np.zeros_like(adj)
 
-def agg_affinity_matrix(act_z: np.ndarray) -> np.ndarray:
-    """
-    Convert agglomerative cosine distance to an affinity matrix
-    A[i,j] = 1 - cosine_distance(act_z[i], act_z[j]).
-    Used for Q transfer scoring (evaluate GN partition on Agg affinity).
-    """
-    from sklearn.preprocessing import normalize
-    normed = normalize(act_z, norm='l2')
-    sim    = (normed @ normed.T).astype(np.float32)
-    np.maximum(sim, 0.0, out=sim)
-    np.fill_diagonal(sim, 0.0)
-    return sparsify_affinity(sim, fraction=GN_SPARSIFY_FRAC)
+    # fraction to keep among nonzero entries so that overall kept = fraction
+    effective_keep = (fraction - zero_frac) / (1.0 - zero_frac)
+    effective_keep = float(np.clip(effective_keep, 0.0, 1.0))
 
+    cutoff = np.quantile(nonzero, 1.0 - effective_keep)
+    out    = np.where(adj >= cutoff, adj, 0.0).astype(np.float32)  # weighted
+    np.fill_diagonal(out, 0.0)
+    return np.maximum(out, out.T)   # ensure symmetry
 
-# =============================================================================
-# GN modularity score
-# =============================================================================
 
 def gn_score(adj: np.ndarray, labels: np.ndarray) -> float:
-    """Q = Σ_k [ e_kk - a_k² ]"""
+    """Q = Σ_k [ e_kk - a_k² ]. Port of girvan_newman_sym() from modularity.py."""
     total = float(adj.sum())
     if total < GN_EPS:
         return 0.0
     Q = 0.0
-    for c in np.unique(labels):
+    for c in np.unique(labels[labels >= 0]):
         mask = labels == c
         e_cc = float(adj[np.ix_(mask, mask)].sum()) / total
         a_c  = float(adj[mask].sum()) / total
@@ -305,12 +388,39 @@ def gn_score(adj: np.ndarray, labels: np.ndarray) -> float:
     return Q
 
 
-# =============================================================================
-# Spectral initialisation
-# =============================================================================
+def _entropy_to_temp(scores: np.ndarray, target: float,
+                      init_t: float = 1.0, eps: float = 0.01,
+                      max_steps: int = 500) -> float:
+    """Port of entropy_to_temperature() from probability.py."""
+    log_t     = np.log(max(init_t, 1e-6))
+    new_log_t = log_t
+    step      = 1.0
+
+    def _ent(lt):
+        s = scores / max(np.exp(lt), 1e-12)
+        s = s - s.max()
+        p = np.exp(s); p /= p.sum()
+        return float(-np.sum(p * np.log(p + 1e-300)))
+
+    ent = _ent(log_t)
+    for _ in range(max_steps):
+        new_log_t = log_t - step if ent > target else log_t + step
+        new_ent   = _ent(new_log_t)
+        if abs(target - new_ent) < eps:
+            break
+        if abs(target - ent) < abs(target - new_ent):
+            step /= 2
+        else:
+            log_t, ent = new_log_t, new_ent
+    return float(np.clip(np.exp(new_log_t), 1e-12, 1e6))
+
 
 def spectral_modularity(adj: np.ndarray,
                          max_clusters: int = GN_MAX_CLUSTERS) -> np.ndarray:
+    """
+    Recursive leading-eigenvector splitting of B = A/m - a·aᵀ.
+    Port of spectral_modularity() from modularity.py.
+    """
     n     = len(adj)
     total = float(adj.sum())
     if total < GN_EPS:
@@ -359,42 +469,16 @@ def spectral_modularity(adj: np.ndarray,
     return labels
 
 
-# =============================================================================
-# Monte Carlo refinement — vectorized delta-Q
-# =============================================================================
-
-def _entropy_to_temp(scores: np.ndarray, target: float,
-                      init_t: float = 1.0, eps: float = 0.01,
-                      max_steps: int = 500) -> float:
-    log_t     = np.log(max(init_t, 1e-6))
-    new_log_t = log_t
-    step      = 1.0
-
-    def _ent(lt):
-        s = scores / max(np.exp(lt), 1e-12)
-        s = s - s.max()
-        p = np.exp(s); p /= p.sum()
-        return float(-np.sum(p * np.log(p + 1e-300)))
-
-    ent = _ent(log_t)
-    for _ in range(max_steps):
-        new_log_t = log_t - step if ent > target else log_t + step
-        new_ent   = _ent(new_log_t)
-        if abs(target - new_ent) < eps:
-            break
-        if abs(target - ent) < abs(target - new_ent):
-            step /= 2
-        else:
-            log_t, ent = new_log_t, new_ent
-    return float(np.clip(np.exp(new_log_t), 1e-12, 1e6))
-
-
 def monte_carlo_modularity(adj: np.ndarray,
                             labels_init: np.ndarray,
-                            steps: int          = MC_STEPS,
+                            steps: int           = MC_STEPS,
                             target_entropy: float = GN_TARGET_ENTROPY,
-                            seed: int            = SEED
+                            seed: int             = SEED
                             ) -> tuple[np.ndarray, float]:
+    """
+    Simulated annealing on GN Q with vectorized delta-Q cache.
+    Port of monte_carlo_modularity() from modularity.py.
+    """
     rng   = np.random.RandomState(seed)
     n     = len(adj)
     total = float(adj.sum())
@@ -416,9 +500,9 @@ def monte_carlo_modularity(adj: np.ndarray,
 
     current_q = 0.0
     for k in range(n_clusters):
-        mask      = labels == k
-        e_kk      = float(adj[np.ix_(mask, mask)].sum()) / total
-        a_k       = cluster_deg[k] / total
+        mask       = labels == k
+        e_kk       = float(adj[np.ix_(mask, mask)].sum()) / total
+        a_k        = cluster_deg[k] / total
         current_q += e_kk - a_k ** 2
 
     best_q      = current_q
@@ -449,10 +533,10 @@ def monte_carlo_modularity(adj: np.ndarray,
 
         best_ci = int(np.argmax(scores))
         if scores[best_ci] > best_q:
-            best_q             = scores[best_ci]
-            tmp                = labels.copy()
-            tmp[i]             = candidates[best_ci]
-            best_labels        = tmp
+            best_q      = scores[best_ci]
+            tmp         = labels.copy()
+            tmp[i]      = candidates[best_ci]
+            best_labels = tmp
 
         temperature = _entropy_to_temp(scores, target_entropy, init_t=temperature)
         s = scores / max(temperature, 1e-12)
@@ -481,8 +565,8 @@ def monte_carlo_modularity(adj: np.ndarray,
                 mk = labels == k
                 if not mk.any():
                     continue
-                e_kk      = float(row_sums[mk, k].sum()) / total
-                a_k       = cluster_deg[k] / total
+                e_kk       = float(row_sums[mk, k].sum()) / total
+                a_k        = cluster_deg[k] / total
                 current_q += e_kk - a_k ** 2
 
     unique = np.unique(best_labels)
@@ -490,59 +574,137 @@ def monte_carlo_modularity(adj: np.ndarray,
     return np.array([remap[int(l)] for l in best_labels], dtype=int), float(best_q)
 
 
-def cluster_downstream_modularity(act_z: np.ndarray,
-                                   sparsify_frac: float  = GN_SPARSIFY_FRAC,
-                                   mc_steps: int         = MC_STEPS,
-                                   target_entropy: float = GN_TARGET_ENTROPY,
-                                   seed: int             = SEED
-                                   ) -> tuple[np.ndarray, float, int, np.ndarray]:
+def cluster_modularity_from_adj(adj_sp: np.ndarray,
+                                 mc_steps: int = MC_STEPS,
+                                 seed: int     = SEED
+                                 ) -> tuple[np.ndarray, float, int]:
     """
-    Returns: labels, gn_q, n_clusters, adj_sp (sparse adjacency kept for reuse)
+    Run spectral init + Monte Carlo refinement on a pre-sparsified adjacency.
+    Clean separation of clustering from association construction.
     """
-    adj    = downstream_affinity_matrix(act_z)
-    adj_sp = sparsify_affinity(adj, fraction=sparsify_frac)
     if float(adj_sp.sum()) < GN_EPS:
-        return np.zeros(len(act_z), dtype=int), 0.0, 1, adj_sp
-    labels_spec  = spectral_modularity(adj_sp)
-    labels_mc, q = monte_carlo_modularity(
-        adj_sp, labels_spec,
-        steps=mc_steps, target_entropy=target_entropy, seed=seed,
-    )
-    return labels_mc, q, int(labels_mc.max()) + 1, adj_sp
+        return np.zeros(len(adj_sp), dtype=int), 0.0, 1
+    labels_spec = spectral_modularity(adj_sp)
+    labels_mc, q = monte_carlo_modularity(adj_sp, labels_spec,
+                                           steps=mc_steps, seed=seed)
+    return labels_mc, q, int(labels_mc.max()) + 1
+
+
+def cluster_modularity_alive(adj_sp: np.ndarray,
+                              mc_steps: int = MC_STEPS,
+                              seed: int     = SEED
+                              ) -> tuple[np.ndarray, float, int, np.ndarray]:
+    """
+    Cluster only non-isolated neurons. Dead neurons (degree-zero) get label -1.
+
+    Mirrors the original repo's handling of 'dead' units: spectral_modularity()
+    and monte_carlo_modularity() in modularity.py both explicitly exclude units
+    whose degree is below ADJACENCY_EPS before clustering.
+
+    Returns:
+      labels_full : (D,) — cluster id or -1 for dead neurons
+      q           : GN Q of the alive subgraph
+      k           : number of clusters found
+      alive       : (D,) bool mask of non-dead neurons
+    """
+    deg   = adj_sp.sum(axis=1)
+    alive = deg > GN_EPS
+    labels_full = np.full(len(adj_sp), -1, dtype=int)
+
+    if alive.sum() < 2:
+        return labels_full, 0.0, 0, alive
+
+    adj_alive              = adj_sp[np.ix_(alive, alive)]
+    labels_alive, q, k     = cluster_modularity_from_adj(adj_alive, mc_steps, seed)
+    labels_full[alive]     = labels_alive
+    return labels_full, q, k, alive
 
 
 # =============================================================================
-# Reference agglomerative clustering
+# SECTION 3 — EVALUATION
+# alignment, transfer, robustness, SI validation — mirrors eval.py
 # =============================================================================
 
-def cluster_agglomerative_ref(act_z, dist_thresh=DIST_THRESH):
-    condensed = np.clip(pdist(act_z, metric='cosine'), 0, 2)
-    Z         = linkage(condensed, method=AGG_LINKAGE)
-    return fcluster(Z, t=dist_thresh, criterion='distance') - 1
+def greedy_alignment_score(labels_a: np.ndarray,
+                            labels_b: np.ndarray) -> float:
+    """
+    Greedy cluster matching maximizing overlap.
+    Port of alignment_score() from modularity.py.
+    Ignores dead neurons (label == -1).
+    """
+    valid    = (labels_a >= 0) & (labels_b >= 0)
+    la, lb   = labels_a[valid], labels_b[valid]
+    ids_a    = np.unique(la)
+    ids_b    = np.unique(lb)
+    k        = max(len(ids_a), len(ids_b))
+    overlap  = np.zeros((k, k), dtype=np.float64)
+    for ia, ca in enumerate(ids_a):
+        for ib, cb in enumerate(ids_b):
+            overlap[ia, ib] = float(np.sum((la == ca) & (lb == cb)))
+    matched = 0.0
+    for _ in range(k):
+        best = np.unravel_index(np.argmax(overlap), overlap.shape)
+        matched += overlap[best]
+        overlap[best[0], :] = -np.inf
+        overlap[:, best[1]] = -np.inf
+    denom = min(len(la), len(lb))
+    return float(matched / denom) if denom > 0 else 0.0
 
 
-# =============================================================================
-# ROBUSTNESS CHECK 1: Permutation null for Q
-# — are the clusters better than random co-tuning structure?
-# Mirrors the null logic from neuron_selectivity.py (threshold_stability_with_null)
-# and the shuffled_alignment_score idea from modularity.py.
-# =============================================================================
+def shuffled_alignment_null(labels_a: np.ndarray,
+                             labels_b: np.ndarray,
+                             n_shuffle: int = N_SHUFFLE_ALIGN,
+                             seed: int      = SEED) -> dict:
+    """
+    Port of shuffled_alignment_score() from modularity.py / eval.py.
+    Permute alive-neuron order in labels_a to build null distribution.
+    """
+    rng   = np.random.RandomState(seed)
+    obs   = greedy_alignment_score(labels_a, labels_b)
+    alive = (labels_a >= 0) & (labels_b >= 0)
+    n     = alive.sum()
+
+    nulls = np.zeros(n_shuffle)
+    la    = labels_a.copy()
+    for i in range(n_shuffle):
+        la_perm              = labels_a.copy()
+        alive_idx            = np.where(alive)[0]
+        la_perm[alive_idx]   = labels_a[alive_idx[rng.permutation(n)]]
+        nulls[i] = greedy_alignment_score(la_perm, labels_b)
+
+    p_val = float((nulls >= obs).mean())
+    z     = (obs - nulls.mean()) / (nulls.std() + 1e-12)
+    return {'observed': obs, 'null_mean': float(nulls.mean()),
+            'null_std': float(nulls.std()), 'p_value': p_val, 'z_score': z}
+
+
+def q_transfer(labels: np.ndarray, adj_other: np.ndarray) -> float:
+    """
+    Evaluate partition `labels` on a different adjacency matrix `adj_other`.
+    Direct port of transfer_AaPb from eval.py (line 254):
+      this_align_info['transfer_AaPb'] = girvan_newman(info_a['adj'], info_b['clusters'])
+    """
+    return gn_score(adj_other, labels)
+
 
 def permutation_null_q(act_raw: np.ndarray,
                         observed_q: float,
+                        null_graph: str = 'tune',   # 'tune' or 'down'
+                        probe_weights_by_task: dict | None = None,
+                        avail_tasks: list[str] | None = None,
                         n_perm: int  = N_PERM,
                         seed: int    = SEED) -> dict:
     """
-    Shuffle act_raw columns (tasks) → re-z-score → re-build affinity →
-    spectral only (no MC — faster null) → record Q.
+    Permutation null for Q: shuffle act_raw columns → re-z-score → rebuild
+    affinity → run the SAME spectral+MC optimizer used for observed Q.
 
-    Returns:
-      null_qs   : (n_perm,) null Q values
-      p_value   : fraction of null runs with Q >= observed_q
-      z_score   : (observed_q - mean(null)) / std(null)
+    Uses reduced MC steps (MC_STEPS // 5) for speed.
+    `null_graph` selects which association to use for the null:
+      'tune' : task co-tuning graph (always available)
+      'down' : probe-Jacobian graph (requires probe_weights_by_task)
     """
-    rng      = np.random.RandomState(seed)
-    null_qs  = np.zeros(n_perm)
+    rng     = np.random.RandomState(seed)
+    null_qs = np.zeros(n_perm)
 
     for i in range(n_perm):
         act_perm = act_raw.copy()
@@ -552,23 +714,30 @@ def permutation_null_q(act_raw: np.ndarray,
         sigma = act_perm.std(axis=1,  keepdims=True) + 1e-8
         az    = (act_perm - mu) / sigma
 
-        adj_sp       = sparsify_affinity(downstream_affinity_matrix(az))
-        labels_spec  = spectral_modularity(adj_sp)
-        null_qs[i]   = gn_score(adj_sp, labels_spec)
+        if null_graph == 'down' and probe_weights_by_task:
+            A = downstream_probe_jacobian_affinity(probe_weights_by_task,
+                                                    avail_tasks or [])
+            if A is None:
+                A = task_cotuning_affinity_matrix(az)
+        else:
+            A = task_cotuning_affinity_matrix(az)
+
+        adj_sp = sparsify_affinity(A)
+        # Same optimizer as observed Q (MC, not spectral-only)
+        _, q_null, _ = cluster_modularity_from_adj(
+            adj_sp,
+            mc_steps=max(MC_STEPS // 5, 1000),
+            seed=seed + i,
+        )
+        null_qs[i] = q_null
 
     p_val   = float((null_qs >= observed_q).mean())
     null_mu = float(null_qs.mean())
     null_sd = float(null_qs.std()) + 1e-12
     z       = (observed_q - null_mu) / null_sd
+    return {'null_qs': null_qs, 'p_value': p_val,
+            'z_score': z, 'null_mean': null_mu, 'null_std': null_sd}
 
-    return {'null_qs': null_qs, 'p_value': p_val, 'z_score': z,
-            'null_mean': null_mu, 'null_std': null_sd}
-
-
-# =============================================================================
-# ROBUSTNESS CHECK 2: Bootstrap neuron stability
-# — does the partition change when we subsample neurons?
-# =============================================================================
 
 def bootstrap_neuron_stability(act_z: np.ndarray,
                                 full_labels: np.ndarray,
@@ -576,196 +745,66 @@ def bootstrap_neuron_stability(act_z: np.ndarray,
                                 frac: float  = BOOT_FRAC,
                                 seed: int    = SEED) -> dict:
     """
-    Subsample `frac` of neurons N_BOOT times, re-cluster the subsample,
-    then measure ARI between the subsampled-neuron assignments and the
-    corresponding entries of full_labels.
-
-    High mean ARI (> 0.6) → the partition is stable across neuron subsets.
-    Low mean ARI           → the partition is driven by a small subset of
-                             neurons or is otherwise fragile.
+    Subsample `frac` of alive neurons, re-cluster, ARI(full, sub).
+    Only compares alive neurons (labels >= 0).
     """
-    rng  = np.random.RandomState(seed)
-    n    = len(act_z)
-    k    = int(n * frac)
-    aris = np.zeros(n_boot)
+    rng   = np.random.RandomState(seed)
+    alive = full_labels >= 0
+    idxs  = np.where(alive)[0]
+    n     = len(idxs)
+    k     = int(n * frac)
+    aris  = np.zeros(n_boot)
 
     for i in range(n_boot):
-        idx      = rng.choice(n, k, replace=False)
-        sub_z    = act_z[idx]
-        adj_sub  = sparsify_affinity(downstream_affinity_matrix(sub_z))
-        lbl_spec = spectral_modularity(adj_sub)
-        lbl_mc, _ = monte_carlo_modularity(
-            adj_sub, lbl_spec,
-            steps=max(MC_STEPS // 5, 500),   # fewer steps for speed
+        sub_idx  = rng.choice(n, k, replace=False)
+        sub_idxs = idxs[sub_idx]
+        sub_z    = act_z[sub_idxs]
+        adj_sub  = sparsify_affinity(task_cotuning_affinity_matrix(sub_z))
+        lbl_s, _, _ = cluster_modularity_from_adj(
+            adj_sub,
+            mc_steps=max(MC_STEPS // 5, 500),
             seed=seed + i,
         )
-        aris[i] = adjusted_rand_score(full_labels[idx], lbl_mc)
+        aris[i] = adjusted_rand_score(full_labels[sub_idxs], lbl_s)
 
-    return {'aris': aris,
-            'mean_ari': float(aris.mean()),
-            'std_ari' : float(aris.std()),
-            'p25_ari' : float(np.percentile(aris, 25)),
-            'p75_ari' : float(np.percentile(aris, 75))}
-
-
-# =============================================================================
-# ROBUSTNESS CHECK 3: Shuffled alignment null
-# Port of shuffled_alignment_score() from modularity.py.
-# — is the agreement between GN and Agglomerative above chance?
-# =============================================================================
-
-def greedy_alignment_score(labels_a: np.ndarray,
-                            labels_b: np.ndarray) -> float:
-    """
-    Greedy cluster matching: pair clusters across two partitions to maximize
-    overlap, then compute fraction of neurons correctly matched.
-    Port of alignment_score() from modularity.py, pure numpy.
-    """
-    ids_a = np.unique(labels_a)
-    ids_b = np.unique(labels_b)
-    k     = max(len(ids_a), len(ids_b))
-
-    # Build overlap matrix
-    overlap = np.zeros((k, k), dtype=np.float64)
-    for ia, ca in enumerate(ids_a):
-        for ib, cb in enumerate(ids_b):
-            overlap[ia, ib] = float(np.sum((labels_a == ca) & (labels_b == cb)))
-
-    # Greedy matching (same logic as greedy_alignment() in modularity.py)
-    matched = 0.0
-    for _ in range(k):
-        best = np.unravel_index(np.argmax(overlap), overlap.shape)
-        matched += overlap[best]
-        overlap[best[0], :] = -np.inf
-        overlap[:, best[1]] = -np.inf
-
-    denom = min(len(labels_a), len(labels_b))
-    return float(matched / denom) if denom > 0 else 0.0
-
-
-def shuffled_alignment_null(labels_a: np.ndarray,
-                             labels_b: np.ndarray,
-                             n_shuffle: int = N_SHUFFLE_ALIGN,
-                             seed: int      = SEED) -> dict:
-    """
-    Port of shuffled_alignment_score() from modularity.py.
-    Permute labels_a neuron order n_shuffle times, compute alignment score
-    against labels_b each time → null distribution.
-
-    Observed alignment significantly above null → the two methods agree
-    more than expected by chance → partition is robust.
-    """
-    rng     = np.random.RandomState(seed)
-    obs     = greedy_alignment_score(labels_a, labels_b)
-    n       = len(labels_a)
-    nulls   = np.array([
-        greedy_alignment_score(labels_a[rng.permutation(n)], labels_b)
-        for _ in range(n_shuffle)
-    ])
-    p_val   = float((nulls >= obs).mean())
-    z       = (obs - nulls.mean()) / (nulls.std() + 1e-12)
-    return {'observed': obs, 'null_mean': float(nulls.mean()),
-            'null_std': float(nulls.std()), 'p_value': p_val, 'z_score': z}
-
-
-# =============================================================================
-# INTERPRETATION: Q transfer score
-# From eval.py in the modularity repo ("transfer_AaPb" metric):
-# evaluate partition A on adjacency matrix B.
-# If the partition is truly meaningful it should score > 0 on an
-# independently-constructed affinity graph of the same neurons.
-# =============================================================================
-
-def q_transfer(labels: np.ndarray, adj_other: np.ndarray) -> float:
-    """
-    Compute GN Q score of `labels` evaluated on `adj_other`.
-    High score → the partition is meaningful on a different affinity graph,
-    i.e., it captures structure that generalises beyond one construction method.
-    """
-    return gn_score(adj_other, labels)
-
-
-# =============================================================================
-# INTERPRETATION: Cluster labeling and selectivity
-# =============================================================================
-
-def label_cluster(mean_act: np.ndarray,
-                  avail_tasks: list[str]) -> tuple[str, float]:
-    """
-    Assign a semantic label and selectivity index to a cluster.
-
-    Selectivity index:
-      sel = (motion_mean - appear_mean) / (|motion_mean| + |appear_mean| + ε)
-      Range [-1, 1].
-      sel > +GENERALIST_THRESH → 'motion'
-      sel < -GENERALIST_THRESH → 'appearance'
-      |sel| <= GENERALIST_THRESH → 'generalist'
-
-    'motion' here follows MOTION_TASKS / APPEAR_TASKS defined at module level.
-    """
-    m_idx = [i for i, t in enumerate(avail_tasks) if t in MOTION_TASKS]
-    a_idx = [i for i, t in enumerate(avail_tasks) if t in APPEAR_TASKS]
-
-    m_mean = float(mean_act[m_idx].mean()) if m_idx else 0.0
-    a_mean = float(mean_act[a_idx].mean()) if a_idx else 0.0
-
-    denom = abs(m_mean) + abs(a_mean) + 1e-8
-    sel   = (m_mean - a_mean) / denom
-
-    if sel > GENERALIST_THRESH:
-        label = 'motion'
-    elif sel < -GENERALIST_THRESH:
-        label = 'appearance'
-    else:
-        label = 'generalist'
-
-    return label, float(sel)
-
-
-def tuning_sharpness(mean_act: np.ndarray) -> float:
-    """max - min of z-scored tuning profile. > 1 = clear task preference."""
-    return float(mean_act.max() - mean_act.min())
+    return {'aris': aris, 'mean_ari': float(aris.mean()),
+            'std_ari': float(aris.std()),
+            'p25_ari': float(np.percentile(aris, 25)),
+            'p75_ari': float(np.percentile(aris, 75))}
 
 
 def characterize_clusters(labels: np.ndarray,
                            act_z: np.ndarray,
                            avail_tasks: list[str],
                            si: np.ndarray | None) -> dict:
-    """
-    For each cluster produce:
-      label        : 'motion' | 'appearance' | 'generalist'
-      selectivity  : float in [-1, 1]  (positive = motion-dominant)
-      sharpness    : float  (max - min of mean z-scored tuning profile)
-      n_neurons    : int
-      mean_act     : (n_tasks,) mean z-scored activation per task
-      mean_si      : float (mean biological SI of member neurons)
-      std_si       : float
-      si_direction : 'dorsal' | 'ventral' | 'mixed' | 'unknown'
-    """
+    """Auto-label each cluster. Ignores dead neurons (label == -1)."""
     stats = {}
-    for cid in np.unique(labels):
+    for cid in np.unique(labels[labels >= 0]):
         mask     = labels == cid
         mean_act = act_z[mask].mean(axis=0)
-        lbl, sel = label_cluster(mean_act, avail_tasks)
-        sharp    = tuning_sharpness(mean_act)
+
+        m_idx = [i for i, t in enumerate(avail_tasks) if t in MOTION_TASKS]
+        a_idx = [i for i, t in enumerate(avail_tasks) if t in APPEAR_TASKS]
+        m_mean = float(mean_act[m_idx].mean()) if m_idx else 0.0
+        a_mean = float(mean_act[a_idx].mean()) if a_idx else 0.0
+        denom  = abs(m_mean) + abs(a_mean) + 1e-8
+        sel    = (m_mean - a_mean) / denom
+        label  = ('motion' if sel > GENERALIST_THRESH
+                  else 'appearance' if sel < -GENERALIST_THRESH
+                  else 'generalist')
+        sharp  = float(mean_act.max() - mean_act.min())
 
         mean_si, std_si, si_dir = np.nan, np.nan, 'unknown'
         if si is not None and len(si) == D:
             si_c    = si[mask]
             mean_si = float(si_c.mean())
             std_si  = float(si_c.std())
-            # SI > 0 = dorsal-biased, SI < 0 = ventral-biased
-            frac_dorsal = float((si_c > 0).mean())
-            if frac_dorsal > 0.65:
-                si_dir = 'dorsal'
-            elif frac_dorsal < 0.35:
-                si_dir = 'ventral'
-            else:
-                si_dir = 'mixed'
+            fd      = float((si_c > 0).mean())
+            si_dir  = 'dorsal' if fd > 0.65 else 'ventral' if fd < 0.35 else 'mixed'
 
         stats[int(cid)] = {
-            'label'       : lbl,
-            'selectivity' : sel,
+            'label'       : label,
+            'selectivity' : float(sel),
             'sharpness'   : sharp,
             'n_neurons'   : int(mask.sum()),
             'mean_act'    : mean_act.tolist(),
@@ -776,14 +815,13 @@ def characterize_clusters(labels: np.ndarray,
     return stats
 
 
-def si_mwu_between_clusters(labels: np.ndarray,
-                             si: np.ndarray) -> dict:
-    """Mann-Whitney U between all pairs of clusters on their SI distributions."""
+def si_mwu_between_clusters(labels: np.ndarray, si: np.ndarray) -> dict:
     mwu = {}
-    ids = np.unique(labels)
+    ids = np.unique(labels[labels >= 0])
     for i, c1 in enumerate(ids):
         for c2 in ids[i + 1:]:
-            si1, si2 = si[labels == c1], si[labels == c2]
+            si1 = si[labels == c1]
+            si2 = si[labels == c2]
             if len(si1) > 0 and len(si2) > 0:
                 stat, p = mannwhitneyu(si1, si2, alternative='two-sided')
                 mwu[(int(c1), int(c2))] = {'statistic': float(stat),
@@ -792,12 +830,11 @@ def si_mwu_between_clusters(labels: np.ndarray,
 
 
 def motion_spearman(act_z, avail_tasks, si):
-    """Spearman rho(per-neuron motion score, SI)."""
     m_idx = [i for i, t in enumerate(avail_tasks) if t in MOTION_TASKS]
     a_idx = [i for i, t in enumerate(avail_tasks) if t in APPEAR_TASKS]
     m = act_z[:, m_idx].mean(axis=1) if m_idx else np.zeros(D)
     a = act_z[:, a_idx].mean(axis=1) if a_idx else np.zeros(D)
-    mot = m - a
+    mot   = m - a
     valid = ~(np.isnan(mot) | np.isnan(si))
     if valid.sum() < 10:
         return np.nan, np.nan
@@ -809,19 +846,20 @@ def motion_spearman(act_z, avail_tasks, si):
 # =============================================================================
 
 def run_model(model_name, cfg):
-    print(f"\n{'='*60}")
+    print(f"\n{'='*65}")
     print(f"  {cfg['label']} — Downstream Modularity Clustering")
-    print(f"  + Robustness & Interpretation Validation")
-    print(f"{'='*60}")
+    print(f"  Associations: probe-Jacobian (down) + co-tuning (tune)")
+    print(f"{'='*65}")
 
     out_dir = OUT_ROOT / model_name
     out_dir.mkdir(exist_ok=True)
 
-    si_all = load_si(cfg['si_path'])
+    si_all          = load_si(cfg['si_path'])
+    probe_w_paths   = cfg.get('probe_weights', {})
+    has_probe_paths = bool(probe_w_paths)
 
-    # Accumulators across layers
-    layer_ids      = []
-    all_results    = {}   # keyed by layer_idx, stores everything
+    layer_ids    = []
+    all_results  = {}
 
     for layer_idx in range(N_LAYERS):
         print(f"  L{layer_idx:02d}", end='', flush=True)
@@ -833,84 +871,124 @@ def run_model(model_name, cfg):
 
         si = si_all.get(layer_idx)
 
-        # ── Downstream GN clustering ──────────────────────────────────────
-        labels_gn, q_gn, n_gn, adj_gn = cluster_downstream_modularity(act_z)
+        # ── SECTION 1: ASSOCIATIONS ───────────────────────────────────────
+        # Primary: probe-Jacobian downstream graph
+        probe_weights_by_task = {}
+        adj_down              = None
+        if has_probe_paths:
+            probe_weights_by_task = load_probe_weights(probe_w_paths, layer_idx,
+                                                        avail_tasks)
+            adj_down = downstream_probe_jacobian_affinity(probe_weights_by_task,
+                                                           avail_tasks)
 
-        # ── Reference agglomerative ───────────────────────────────────────
-        labels_agg   = cluster_agglomerative_ref(act_z)
-        adj_agg      = agg_affinity_matrix(act_z)
-        ari_agg_gn   = float(adjusted_rand_score(labels_agg, labels_gn))
+        # Secondary: task co-tuning graph
+        adj_tune = task_cotuning_affinity_matrix(act_z)
 
-        # ── ROBUSTNESS 1: Permutation null for Q ─────────────────────────
+        # ── SECTION 2: MODULARITY CLUSTERING ─────────────────────────────
+        adj_tune_sp                          = sparsify_affinity(adj_tune)
+        labels_tune, q_tune, k_tune, alive_t = cluster_modularity_alive(adj_tune_sp)
+
+        labels_down, q_down, k_down, alive_d = None, np.nan, 0, None
+        adj_down_sp                           = None
+        if adj_down is not None:
+            adj_down_sp                              = sparsify_affinity(adj_down)
+            labels_down, q_down, k_down, alive_d    = cluster_modularity_alive(adj_down_sp)
+
+        # ── SECTION 3: EVALUATION ─────────────────────────────────────────
+        # 3a. Alignment and transfer between the two association graphs
+        align_down_tune = None
+        t_down_on_tune  = np.nan
+        t_tune_on_down  = np.nan
+        ari_down_tune   = np.nan
+
+        if labels_down is not None:
+            align_down_tune = shuffled_alignment_null(labels_down, labels_tune)
+            t_down_on_tune  = q_transfer(labels_down, adj_tune_sp)
+            t_tune_on_down  = q_transfer(labels_tune, adj_down_sp)
+            valid           = (labels_down >= 0) & (labels_tune >= 0)
+            if valid.sum() > 1:
+                ari_down_tune = float(adjusted_rand_score(labels_down[valid],
+                                                           labels_tune[valid]))
+
+        # 3b. Permutation null for Q (same optimizer as observed)
         print(" [perm]", end='', flush=True)
-        perm = permutation_null_q(act, q_gn)
+        perm_tune = permutation_null_q(act, q_tune, null_graph='tune')
+        perm_down = {'p_value': np.nan, 'z_score': np.nan,
+                     'null_mean': np.nan, 'null_std': np.nan}
+        if adj_down is not None:
+            perm_down = permutation_null_q(
+                act, q_down, null_graph='down',
+                probe_weights_by_task=probe_weights_by_task,
+                avail_tasks=avail_tasks,
+            )
 
-        # ── ROBUSTNESS 2: Bootstrap neuron stability ──────────────────────
+        # 3c. Bootstrap neuron stability (co-tuning graph)
         print("[boot]", end='', flush=True)
-        boot = bootstrap_neuron_stability(act_z, labels_gn)
+        boot = bootstrap_neuron_stability(act_z, labels_tune)
 
-        # ── ROBUSTNESS 3: Shuffled alignment null ─────────────────────────
-        align_null = shuffled_alignment_null(labels_gn, labels_agg)
+        # 3d. SI biological validation
+        chars_tune  = characterize_clusters(labels_tune, act_z, avail_tasks, si)
+        chars_down  = {}
+        mwu_tune    = {}
+        mwu_down    = {}
+        rho_mot, p_mot = np.nan, np.nan
 
-        # ── INTERPRETATION: Q transfer ────────────────────────────────────
-        # GN partition evaluated on Agg affinity and vice versa
-        q_gn_on_agg  = q_transfer(labels_gn,  adj_agg)
-        q_agg_on_gn  = q_transfer(labels_agg, adj_gn)
-
-        # ── INTERPRETATION: Cluster labeling ─────────────────────────────
-        cluster_chars = characterize_clusters(labels_gn, act_z, avail_tasks, si)
-
-        # ── INTERPRETATION: SI Mann-Whitney between clusters ──────────────
-        mwu = {}
         if si is not None and len(si) == D:
-            mwu = si_mwu_between_clusters(labels_gn, si)
-
-        # ── INTERPRETATION: Spearman rho(motion, SI) ─────────────────────
-        rho_mot, p_mot = (np.nan, np.nan)
-        if si is not None and len(si) == D:
+            mwu_tune   = si_mwu_between_clusters(labels_tune, si)
             rho_mot, p_mot = motion_spearman(act_z, avail_tasks, si)
+            if labels_down is not None:
+                chars_down = characterize_clusters(labels_down, act_z, avail_tasks, si)
+                mwu_down   = si_mwu_between_clusters(labels_down, si)
 
         layer_ids.append(layer_idx)
         all_results[layer_idx] = {
-            'q_gn'         : q_gn,
-            'n_gn'         : n_gn,
-            'n_agg'        : int(labels_agg.max()) + 1,
-            'ari_agg_gn'   : ari_agg_gn,
-            # robustness
-            'perm_p'       : perm['p_value'],
-            'perm_z'       : perm['z_score'],
+            # tune graph
+            'q_tune'       : q_tune,
+            'k_tune'       : k_tune,
+            'perm_tune_p'  : perm_tune['p_value'],
+            'perm_tune_z'  : perm_tune['z_score'],
+            'n_dead_tune'  : int((~alive_t).sum()) if alive_t is not None else 0,
+            # down graph
+            'q_down'       : q_down,
+            'k_down'       : k_down,
+            'perm_down_p'  : perm_down['p_value'],
+            'perm_down_z'  : perm_down['z_score'],
+            'n_dead_down'  : int((~alive_d).sum()) if alive_d is not None else 0,
+            # cross-graph evaluation
+            'ari_down_tune'      : ari_down_tune,
+            'align_obs'          : align_down_tune['observed'] if align_down_tune else np.nan,
+            'align_p'            : align_down_tune['p_value']  if align_down_tune else np.nan,
+            'align_z'            : align_down_tune['z_score']  if align_down_tune else np.nan,
+            'transfer_down_tune' : t_down_on_tune,
+            'transfer_tune_down' : t_tune_on_down,
+            # bootstrap
             'boot_ari_mean': boot['mean_ari'],
             'boot_ari_std' : boot['std_ari'],
-            'align_obs'    : align_null['observed'],
-            'align_p'      : align_null['p_value'],
-            'align_z'      : align_null['z_score'],
-            # interpretation
-            'q_gn_on_agg'  : q_gn_on_agg,
-            'q_agg_on_gn'  : q_agg_on_gn,
-            'cluster_chars': cluster_chars,
-            'mwu'          : mwu,
+            # SI
             'rho_mot'      : float(rho_mot),
             'p_mot'        : float(p_mot),
-            'labels_gn'    : labels_gn,
+            # cluster details
+            'chars_tune'   : chars_tune,
+            'chars_down'   : chars_down,
+            'labels_tune'  : labels_tune,
+            'labels_down'  : labels_down,
             'avail_tasks'  : avail_tasks,
         }
 
         # Console line
-        char_str = '  '.join(
-            f"C{c}:{s['label']}(sel={s['selectivity']:+.2f}"
-            f" sharp={s['sharpness']:.2f}"
-            f" si={s['mean_si']:+.2f}[{s['si_direction']}])"
-            for c, s in cluster_chars.items()
-        )
-        print(f"\n    k={n_gn} Q={q_gn:.3f} "
-              f"perm_p={perm['p_value']:.3f}(z={perm['z_score']:+.1f}) "
-              f"boot_ARI={boot['mean_ari']:.3f}±{boot['std_ari']:.3f} "
-              f"align_p={align_null['p_value']:.3f} "
-              f"ARI(GN,Agg)={ari_agg_gn:.3f} "
+        down_str = (f" | down k={k_down} Q={q_down:.3f} "
+                    f"perm_p={perm_down['p_value']:.2f}"
+                    if labels_down is not None else " | down: no probe weights")
+        print(f"\n    tune k={k_tune} Q={q_tune:.3f} "
+              f"perm_p={perm_tune['p_value']:.2f}(z={perm_tune['z_score']:+.1f}) "
+              f"boot={boot['mean_ari']:.2f}"
+              f"{down_str} "
               f"rho_mot={rho_mot:+.3f}")
-        print(f"    transfer: Q(GN→Agg)={q_gn_on_agg:.3f}  "
-              f"Q(Agg→GN)={q_agg_on_gn:.3f}")
-        print(f"    {char_str}")
+        if align_down_tune:
+            print(f"    align(down,tune)={align_down_tune['observed']:.3f} "
+                  f"p={align_down_tune['p_value']:.3f}  "
+                  f"transfer(d→t)={t_down_on_tune:.3f} "
+                  f"transfer(t→d)={t_tune_on_down:.3f}")
 
     if not layer_ids:
         print(f"  No usable layers for {model_name}")
@@ -921,100 +999,85 @@ def run_model(model_name, cfg):
 
 
 def _print_summary(model_name, label, layer_ids, all_results, out_dir):
-    """
-    Three-section table:
-      Section A — robustness: perm_p, boot_ARI, align_p, ARI(GN, Agg)
-      Section B — interpretation: Q transfer, rho_mot
-      Section C — per-cluster labels, selectivity, sharpness, SI direction
-    """
     lines = [
         '=' * 100,
         f'  {label} — Downstream Modularity Clustering',
-        f'  Affinity: A[i,j] = max(0, act_z[i]·act_z[j])  |  '
-        f'Sparsify: top {GN_SPARSIFY_FRAC*100:.0f}%  |  MC steps: {MC_STEPS}',
+        f'  Affinity (down): Σ_tasks W_t.T @ W_t  (probe-Jacobian)',
+        f'  Affinity (tune): max(0, act_z @ act_z.T)  (task co-tuning)',
+        f'  Sparsify: top {GN_SPARSIFY_FRAC*100:.0f}% of edges (weighted)',
+        f'  MC steps: {MC_STEPS}  |  Null: same optimizer, steps={max(MC_STEPS//5,1000)}',
         '=' * 100,
         '',
         '  SECTION A — ROBUSTNESS',
-        '  (Are the clusters meaningful structure rather than noise?)',
-        '',
-        f"  {'L':>3} {'k':>3} {'Q':>7} "
-        f"{'perm_p':>7} {'perm_z':>7} "
-        f"{'boot_ARI':>9} "
-        f"{'align_p':>8} {'align_z':>7} "
-        f"{'ARI(GN,Agg)':>12}",
-        '  ' + '-' * 70,
+        f"  {'L':>3} {'k_t':>4} {'Q_t':>7} {'perm_p_t':>9} "
+        f"{'k_d':>4} {'Q_d':>7} {'perm_p_d':>9} "
+        f"{'boot':>7} {'ARI(d,t)':>9}",
+        '  ' + '-' * 72,
     ]
     for li in layer_ids:
         r = all_results[li]
         lines.append(
-            f"  {li:>3} {r['n_gn']:>3} {r['q_gn']:>7.4f} "
-            f"{r['perm_p']:>7.3f} {r['perm_z']:>7.2f} "
-            f"{r['boot_ari_mean']:>7.3f}±{r['boot_ari_std']:.2f} "
-            f"{r['align_p']:>8.3f} {r['align_z']:>7.2f} "
-            f"{r['ari_agg_gn']:>12.3f}"
+            f"  {li:>3} {r['k_tune']:>4} {r['q_tune']:>7.4f} {r['perm_tune_p']:>9.3f} "
+            f"{r['k_down']:>4} {r['q_down']:>7.4f} {r['perm_down_p']:>9.3f} "
+            f"{r['boot_ari_mean']:>5.3f}±{r['boot_ari_std']:.2f} "
+            f"{r['ari_down_tune']:>9.3f}"
         )
     lines += [
         '',
-        '  Robustness guide:',
-        '  perm_p < 0.05  → Q is above the random co-tuning null',
-        '  perm_z > 2     → Q is > 2 SD above null mean',
-        '  boot_ARI > 0.6 → partition stable across 80% neuron subsamples',
-        '  align_p < 0.05 → GN/Agg agreement exceeds chance (shuffled null)',
-        '  ARI(GN,Agg) > 0.5 → both methods find the same partition',
+        '  perm_p < 0.05 → Q above random null (same MC optimizer)',
+        '  boot > 0.6    → stable across 80% neuron subsamples',
+        '  ARI(d,t)      → agreement between probe-Jacobian and co-tuning partitions',
         '',
-        '  SECTION B — INTERPRETATION (Q TRANSFER + SI CORRELATION)',
-        '  (Does the partition generalise, and does it align with biology?)',
-        '',
-        f"  {'L':>3} {'Q(GN→Agg)':>11} {'Q(Agg→GN)':>11} {'rho_mot':>9} {'p_mot':>9}",
-        '  ' + '-' * 46,
+        '  SECTION B — CROSS-GRAPH TRANSFER (eval.py transfer_AaPb analog)',
+        f"  {'L':>3} {'align_obs':>10} {'align_p':>8} "
+        f"{'Q(d→t)':>9} {'Q(t→d)':>9} {'rho_mot':>9}",
+        '  ' + '-' * 55,
     ]
     for li in layer_ids:
         r = all_results[li]
         lines.append(
-            f"  {li:>3} {r['q_gn_on_agg']:>11.4f} {r['q_agg_on_gn']:>11.4f} "
-            f"{r['rho_mot']:>9.3f} {r['p_mot']:>9.4f}"
+            f"  {li:>3} {r['align_obs']:>10.3f} {r['align_p']:>8.3f} "
+            f"{r['transfer_down_tune']:>9.4f} {r['transfer_tune_down']:>9.4f} "
+            f"{r['rho_mot']:>9.3f}"
         )
     lines += [
         '',
-        '  Transfer guide:',
-        '  Q(GN→Agg) > 0  → GN partition captures real structure in the Agg graph',
-        '  Q(Agg→GN) > 0  → Agg partition captures real structure in the GN graph',
-        '  High transfer in both directions → robust cross-method structure',
-        '  rho_mot > 0    → motion-active neurons are dorsal-biased (expected)',
+        '  Q(d→t) > 0 → probe-Jacobian partition captures structure in co-tuning graph',
+        '  Q(t→d) > 0 → co-tuning partition captures structure in probe-Jacobian graph',
         '',
-        '  SECTION C — CLUSTER LABELS & SI ALIGNMENT',
-        '  (What does each cluster represent?)',
+        '  SECTION C — CLUSTER LABELS (tune graph)',
         '',
     ]
     for li in layer_ids:
-        r    = all_results[li]
-        avt  = r['avail_tasks']
-        lines.append(f"  Layer {li:02d}:")
-        for cid, cs in sorted(r['cluster_chars'].items()):
-            act_str = '  '.join(
-                f"{t}:{v:+.2f}"
-                for t, v in zip(avt, cs['mean_act'])
-            )
+        r   = all_results[li]
+        avt = r['avail_tasks']
+        lines.append(f"  Layer {li:02d} [tune]:")
+        for cid, cs in sorted(r['chars_tune'].items()):
+            act_str = '  '.join(f"{t}:{v:+.2f}"
+                                for t, v in zip(avt, cs['mean_act']))
             lines.append(
-                f"    C{cid} [{cs['label']:>10}]  "
-                f"n={cs['n_neurons']:>4}  "
-                f"sel={cs['selectivity']:+.3f}  "
-                f"sharp={cs['sharpness']:.3f}  "
-                f"SI={cs['mean_si']:+.3f}±{cs['std_si']:.3f}  "
-                f"bio={cs['si_direction']}"
+                f"    C{cid} [{cs['label']:>10}]  n={cs['n_neurons']:>4}  "
+                f"sel={cs['selectivity']:+.3f}  sharp={cs['sharpness']:.3f}  "
+                f"SI={cs['mean_si']:+.3f}  bio={cs['si_direction']}"
             )
             lines.append(f"         tuning: {act_str}")
+        if r['chars_down']:
+            lines.append(f"  Layer {li:02d} [down]:")
+            for cid, cs in sorted(r['chars_down'].items()):
+                act_str = '  '.join(f"{t}:{v:+.2f}"
+                                    for t, v in zip(avt, cs['mean_act']))
+                lines.append(
+                    f"    C{cid} [{cs['label']:>10}]  n={cs['n_neurons']:>4}  "
+                    f"sel={cs['selectivity']:+.3f}  sharp={cs['sharpness']:.3f}  "
+                    f"SI={cs['mean_si']:+.3f}  bio={cs['si_direction']}"
+                )
         lines.append('')
+
     lines += [
-        '  Cluster label guide:',
-        '  motion     — fires more for MOTION_TASKS than APPEAR_TASKS',
-        '               consistent with dorsal (SI > 0) if biology aligns',
-        '  appearance — fires more for APPEAR_TASKS than MOTION_TASKS',
-        '               consistent with ventral (SI < 0) if biology aligns',
-        '  generalist — flat z-scored profile; |selectivity| <= '
-        f'{GENERALIST_THRESH}',
-        '  sharpness > 1.0  → strong task preference',
-        '  sharpness < 0.5  → weak/flat tuning (may be noise cluster)',
+        '  Label guide:',
+        '  motion     → fires more for MOTION_TASKS; expected SI direction: dorsal',
+        '  appearance → fires more for APPEAR_TASKS; expected SI direction: ventral',
+        '  generalist → flat z-scored profile, |selectivity| <= ' + str(GENERALIST_THRESH),
         '',
         f'  Reproduce:  python clustering_downstream.py {model_name}',
     ]
@@ -1025,22 +1088,28 @@ def _print_summary(model_name, label, layer_ids, all_results, out_dir):
 
 
 def _save_results(model_name, layer_ids, all_results, out_dir):
-    save = dict(layer_ids=np.array(layer_ids))
     scalar_keys = [
-        'q_gn', 'n_gn', 'n_agg', 'ari_agg_gn',
-        'perm_p', 'perm_z', 'boot_ari_mean', 'boot_ari_std',
-        'align_obs', 'align_p', 'align_z',
-        'q_gn_on_agg', 'q_agg_on_gn', 'rho_mot', 'p_mot',
+        'q_tune', 'k_tune', 'perm_tune_p', 'perm_tune_z', 'n_dead_tune',
+        'q_down', 'k_down', 'perm_down_p', 'perm_down_z', 'n_dead_down',
+        'ari_down_tune', 'align_obs', 'align_p', 'align_z',
+        'transfer_down_tune', 'transfer_tune_down',
+        'boot_ari_mean', 'boot_ari_std', 'rho_mot', 'p_mot',
     ]
+    save = dict(layer_ids=np.array(layer_ids))
     for k in scalar_keys:
         save[k] = np.array([all_results[l][k] for l in layer_ids], dtype=float)
 
     for li in layer_ids:
         if li in SELECTED_LAYERS:
-            save[f'labels_gn_L{li:02d}']    = all_results[li]['labels_gn']
-            save[f'cluster_json_L{li:02d}'] = np.array(
-                [json.dumps(all_results[li]['cluster_chars'])]
+            save[f'labels_tune_L{li:02d}']     = all_results[li]['labels_tune']
+            save[f'chars_tune_json_L{li:02d}'] = np.array(
+                [json.dumps(all_results[li]['chars_tune'])]
             )
+            if all_results[li]['labels_down'] is not None:
+                save[f'labels_down_L{li:02d}']     = all_results[li]['labels_down']
+                save[f'chars_down_json_L{li:02d}'] = np.array(
+                    [json.dumps(all_results[li]['chars_down'])]
+                )
 
     path = out_dir / f'{model_name}_downstream_clustering.npz'
     np.savez_compressed(str(path), **save)
